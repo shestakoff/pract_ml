@@ -1,0 +1,297 @@
+---
+title: "Prediction Assignment Writeup"
+author: "Shestakov Andrey"
+date: "01/27/2016"
+output: 
+  html_document:
+    toc: true
+---
+
+## Data loading and cleaning
+It turns out that some observations contain string "#DIV/0!" and correspondent covariates were coverted to factors, so we have to treat "#DIV/0!" as NA.
+
+```{r}
+data = read.csv('pml-training.csv', na.strings = c('#DIV/0!', 'NA'))
+test = read.csv('pml-testing.csv', na.strings = c('#DIV/0!', 'NA'))
+# summary(data)
+
+# clean completely NA vars
+col.ratio.na = sapply(data, function(x){sum(is.na(x))/length(x)})
+data = data[col.ratio.na==0]
+test = test[col.ratio.na==0]
+names(data)
+```
+
+Ok, looks like all the data (variance, kutorsis, etc..) that was calculated with sliding window method is doomed..
+
+### The Revelation
+
+In fact, I have a strong feeling, that variable `classe` can be accurately predicted by means of timestamp. The dataset has a strong structure. In paper the researchers said that they had asked participants to perform the excercise in a specific way (classe) and record the data afterwards.
+
+If test data was sampled randomly from the initial dataset, then `classe` of test samples can be recovered from the train observations, that were recorded in the same time...
+
+```{r}
+pred_naive = c()
+for (i in seq(1, nrow(test))){
+  temp = data[ data$user_name == test$user_name[i] &
+               data$raw_timestamp_part_1 == test$raw_timestamp_part_1[i], 
+               c('raw_timestamp_part_2', 'classe')]
+  delta = abs(temp$raw_timestamp_part_2 - test$raw_timestamp_part_2[i])
+  # print(min(delta))
+  pred_naive = append(pred_naive, as.character(temp$classe[which.min(delta)]))
+}
+pred = data.frame(problem_id = test$problem_id, classe = pred_naive)
+pred
+```
+
+Some times differences can be quite large, so this strategy could be wrong.
+Anyway, lets assume we are not aware of this ''trick''
+
+### Timestamp exploration
+
+```{r}
+# sorting..
+data = data[order(data$user_name, data$raw_timestamp_part_1, data$raw_timestamp_part_2),]
+test = test[order(test$user_name, test$raw_timestamp_part_1, test$raw_timestamp_part_2),]
+
+# data[60:90, c('raw_timestamp_part_1','raw_timestamp_part_2', 
+#               'num_window', 'new_window', 'cvtd_timestamp')]
+```
+
+Accoriding to this [resource](http://www.epochconverter.com/) `raw_timestamp_part_1` has precision up to seconds. `raw_timestamp_part_2` is probably for tinyer time measures.
+`num_window` is probably Id or windows.
+Not clear what `new_window` is.
+
+Windows have different length.
+```{r, eval=F}
+table(data$new_window, data$num_window)
+```
+
+### Measurements exploration
+
+It seems to me, that the name of the participat is very usefull covatiate, since different people have different characteristics of movements. Let's see if all participants have approximately the same number of observations.
+
+```{r}
+addmargins(table(data$user_name, data$classe))
+```
+
+Ok, so we don't have something odd with number of observations per participant, but classes are a bit disbalanced.
+
+#### Distibutions
+Lets see how our measurements are spread with respect to `user_name` and `classe` values
+
+```{r}
+library(ggplot2)
+bp = ggplot(data, aes(y=roll_belt, x=classe)) +
+  geom_boxplot(aes(fill=user_name)) +
+  facet_grid(.~user_name)
+print(bp)
+```
+
+```{r}
+nm = colnames(data)
+for (i in seq(8,59)){
+    
+  bp = ggplot(data, aes_string(y=nm[i], x='classe')) +
+    geom_boxplot(aes(fill=user_name)) +
+    facet_grid(.~user_name)
+  
+  print(bp)
+  }
+
+```
+
+Ok, at least we can identify some outliers..
+
+#### Considering time domain
+
+Another option to look at the data - consider time domain.
+It turns out, that variable `X` is responsible for timing.
+But it is not that good for visualizaion purposes...
+```{r}
+data$time = NA
+
+for (n in unique(data$user_name)){
+  idx = data$user_name == n
+  data$time[idx] = seq(1, sum(idx))
+}
+
+p = ggplot(data, aes(y=total_accel_belt, x=time)) +
+  geom_point(aes(color=classe)) +
+  facet_grid(.~user_name, scales='free', space='free')
+print(p)
+
+```
+Let's look at other covariates:
+
+```{r}
+nm = colnames(data)
+for (i in seq(8,59)){
+    
+  p = ggplot(data, aes_string(y=nm[i], x='time')) +
+    geom_point(aes(color=classe)) +
+    facet_grid(.~user_name, scales='free', space='free')
+  
+  print(p)
+  }
+
+```
+
+#### Remove outliers
+
+This a naked eye we can indicate some outliers. Lets wipe them out
+
+```{r}
+idx = data$gyros_dumbbell_x < -50 | data$gyros_dumbbell_y > 20 | data$gyros_dumbbell_z >100 |
+  data$accel_dumbbell_x < -200 | 
+  (data$accel_dumbbell_y > 100 & data$user_name == 'eurico' & data$classe == 'A') |  
+  (data$accel_dumbbell_z > 200 & data$user_name == 'eurico' & data$classe == 'A') | 
+  (data$accel_dumbbell_z < -200 & data$user_name == 'carlitos' & data$classe == 'A') |
+  data$magnet_dumbbell_y < -1000 | data$total_accel_forearm > 90 | data$gyros_forearm_x < -5 |
+  data$gyros_forearm_y > 100 | data$gyros_forearm_z > 100 |
+  data$accel_forearm_y > 500 | 
+  (data$accel_forearm_z < 0 & data$user_name == 'eurico' & data$classe == 'A') |
+  (data$accel_forearm_x < 100 & data$user_name == 'eurico' & data$classe == 'A') |
+  (data$accel_forearm_x < 100 & data$user_name == 'carlitos' & data$classe == 'A') |
+  data$yaw_belt < -100 | data$gyros_belt_x > 1 | 
+  (data$magnet_belt_x > 300 & data$user_name == 'adelmo' & data$classe == 'E') |
+  (data$magnet_belt_x > 150 & data$user_name == 'eurico' & data$classe == 'E') |
+  (data$magnet_belt_z > -375 & data$user_name == 'eurico' & data$classe == 'E') |
+  (data$total_accel_dumbbell >20 & data$user_name == 'carlitos' & data$classe == 'A') |
+  (data$total_accel_dumbbell >20 & data$user_name == 'eurico' & data$classe == 'A')
+
+print(sum(idx))
+data = data[!idx,]
+
+# Also remove the following columns:
+cols = c('roll_forearm', 'pitch_forearm', 'yaw_forearm', 'roll_arm', 'pitch_arm', 'yaw_arm')
+data = data[setdiff(names(data), cols)]
+```
+
+### Transformation
+
+At first we will Normalize the data, since it has rather different scales, and perform PCA afterwards
+```{r}
+library(caret)
+library(randomForest)
+library(doMC) # to run in parallel
+
+preProc = preProcess(x = data[,8:53], 
+                         method = c('center', 'scale', 'pca'),
+                         thresh = 0.9)
+
+data_pca = predict(preProc, data)
+test_pca = predict(preProc, test)
+```
+
+Let's see..
+
+```{r}
+p = ggplot(data_pca, aes(y=PC1, x=PC2)) +
+  geom_point(aes(color=user_name)) +
+  facet_grid(.~classe)
+print(p)
+
+for (n in unique(data$user_name)){
+  df_temp = predict(preProc, data[data$user_name==n,])
+  
+  p = ggplot(df_temp, aes(y=PC1, x=PC2)) +
+    geom_point(aes(color=classe)) +
+    ggtitle(n)
+  print(p)
+  }
+```
+
+Ok, we could distinguish between participants rather then between classes..
+But this is not our task)
+
+How about we make unique preprocessing for each participant:
+
+```{r}
+preProcUsers = list()
+for (n in unique(data$user_name)){
+  preProc = preProcess(x = data[data$user_name == n, 8:53], 
+                         method = c('center', 'scale', 'pca'),
+                         thresh = 0.9)
+  preProcUsers[[n]] = preProc
+}
+```
+
+Seems a bit better to me..
+```{r}
+for (n in unique(data$user_name)){
+  df_temp = predict(preProcUsers[[n]], data[data$user_name==n,])
+  
+  p = ggplot(df_temp, aes(y=PC1, x=PC2)) +
+    geom_point(aes(color=classe)) +
+    ggtitle(n)
+  print(p)
+  }
+```
+However, using that method is incorrect since, for instance, PC1 has different meaning for each user..
+
+## Learning
+
+Let's recap what we have:
+```{r}
+addmargins(table(data_pca$user_name, data_pca$classe))
+
+# Leave only relevant columns
+cols = c('X', 'raw_timestamp_part_1', 'raw_timestamp_part_2', 'cvtd_timestamp', 'new_window', 'num_window', 'time')
+
+data_pca = data_pca[, setdiff(names(data_pca), cols)]
+test_pca = test_pca[, setdiff(names(test_pca), cols)]
+```
+
+
+We already have test sample.
+For quality estimations we will use CV.
+```{r}
+fitControl = trainControl(method = 'repeatedcv', 
+                          number = 5,
+                          repeats = 5,
+                          classProbs = T)
+```
+#### Model Fit
+```{r}
+set.seed(123)
+registerDoMC(4) # to run in parallel
+
+if(file.exists('rfFit.RData')) {
+  ## load model
+  load('rfFit.RData')
+} else {
+  ## (re)fit the model
+  rfFit = train(classe~., data = data_pca,
+            allowParallel=TRUE,
+            method = 'rf',
+            metric = 'Accuracy',
+            trControl = fitControl,
+            verbose = FALSE)
+  # It could take a while, so lets save it
+  save(rfFit, file = 'rfFit.RData')
+}
+```
+
+#### The model
+```{r}
+print(rfFit)
+```
+
+#### Feature Importances
+```{r}
+varImpPlot(rfFit$finalModel)
+```
+
+#### CV Results
+```{r}
+print(rfFit$finalModel)
+```
+
+#### Prediction
+```{r}
+pred_cl = predict(rfFit, test_pca)
+pred_rf = data.frame(problem_id = test_pca$problem_id, 
+                     classe = pred_cl )
+pred_rf
+```
